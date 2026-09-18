@@ -8,8 +8,9 @@ tags:
 - quality
 importance: 5
 kind: tech_debt
-status: proposed
+status: in_progress
 priority: medium
+assignee: agent:pyrite-worker
 effort: S
 rank: 0
 ---
