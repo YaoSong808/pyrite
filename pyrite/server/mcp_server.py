@@ -964,7 +964,12 @@ class PyriteMCPServer:
                 target_kb=target_kb,
                 note=note,
             )
-        except EntryNotFoundError as e:
+        except (EntryNotFoundError, KBNotFoundError) as e:
+            # Both are deterministic: a missing entry or an unregistered KB does
+            # not appear on retry. _DOMAIN_ERROR_CODES maps both to NOT_FOUND
+            # elsewhere; #97's acceptance text asks for LINK_FAILED here, so
+            # this handler deliberately diverges on the code but not on
+            # retryability.
             return _error("LINK_FAILED", str(e), retryable=False)
         except PyriteError as e:
             return _error("LINK_FAILED", str(e), retryable=True)

@@ -745,14 +745,19 @@ class KBService:
         if not target_kb_config:
             raise KBNotFoundError(f"KB not found: {tkb}")
 
-        target_repo = repo if tkb == source_kb else KBRepository(target_kb_config)
-        if not target_repo.load(target_id):
-            raise EntryNotFoundError(f"Entry not found: {target_id}")
-
-        # Check for duplicate
+        # Duplicates are checked before the target is validated: re-issuing a
+        # link already recorded in the source's frontmatter must stay a no-op
+        # even if the target has since been deleted. Otherwise anything that
+        # replays a link set for idempotency -- a re-run migration, a re-driven
+        # bulk script, an agent retrying a batch -- fails on links its own
+        # earlier pass wrote correctly.
         for existing in entry.links:
             if existing.target == target_id and (existing.kb or source_kb) == tkb:
                 return  # Link already exists
+
+        target_repo = repo if tkb == source_kb else KBRepository(target_kb_config)
+        if not target_repo.load(target_id):
+            raise EntryNotFoundError(f"Entry not found: {target_id}")
 
         entry.add_link(target=target_id, relation=relation, note=note, kb=tkb)
         entry.updated_at = datetime.now(UTC)

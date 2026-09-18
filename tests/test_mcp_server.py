@@ -968,6 +968,90 @@ class TestPyriteMCPServer:
         assert stored is not None
         assert all(link.target != "no-such-target" for link in stored.links)
 
+    def test_kb_link_replayed_after_target_deleted_is_still_a_noop(self, mcp_admin_server):
+        """Re-issuing a link that is already recorded stays a silent no-op, even
+        when the target has since been deleted.
+
+        The duplicate check has to run before the target-existence check, or
+        anything that replays a link set for idempotency — a re-run migration, a
+        re-driven bulk script, an agent retrying a batch — starts failing on
+        links its own earlier pass already wrote correctly."""
+        server = mcp_admin_server["server"]
+        source = server._dispatch_tool(
+            "kb_create",
+            {
+                "kb_name": "test-events",
+                "entry_type": "event",
+                "title": "Idempotent Link Source",
+                "date": "2025-04-07",
+                "body": "Source entry.",
+            },
+        )
+        target = server._dispatch_tool(
+            "kb_create",
+            {
+                "kb_name": "test-events",
+                "entry_type": "event",
+                "title": "Idempotent Link Target",
+                "date": "2025-04-08",
+                "body": "Target entry.",
+            },
+        )
+        link_args = {
+            "source_id": source["entry_id"],
+            "source_kb": "test-events",
+            "target_id": target["entry_id"],
+        }
+
+        first = server._dispatch_tool("kb_link", link_args)
+        assert first["linked"] is True
+
+        deleted = server._dispatch_tool(
+            "kb_delete",
+            {"entry_id": target["entry_id"], "kb_name": "test-events", "confirm": True},
+        )
+        assert "error" not in deleted, deleted
+
+        replay = server._dispatch_tool("kb_link", link_args)
+        assert "error" not in replay, replay
+        assert replay["linked"] is True
+
+        stored = KBRepository(mcp_admin_server["test-events"]).load(source["entry_id"])
+        assert stored is not None
+        assert [link.target for link in stored.links].count(target["entry_id"]) == 1
+
+    def test_kb_link_missing_target_kb_is_not_retryable(self, mcp_admin_server):
+        """A target KB that is not registered is a deterministic error.
+
+        Retrying does not register a KB, so the response must not invite one —
+        the same anti-pattern test_kb_search_query_syntax_error_is_not_internal
+        exists to prevent."""
+        server = mcp_admin_server["server"]
+        source = server._dispatch_tool(
+            "kb_create",
+            {
+                "kb_name": "test-events",
+                "entry_type": "event",
+                "title": "Missing Target KB Source",
+                "date": "2025-04-09",
+                "body": "Source entry.",
+            },
+        )
+
+        result = server._dispatch_tool(
+            "kb_link",
+            {
+                "source_id": source["entry_id"],
+                "source_kb": "test-events",
+                "target_id": "anything",
+                "target_kb": "no-such-kb",
+            },
+        )
+
+        assert result["error_code"] == "LINK_FAILED"
+        assert result["error"] == "KB not found: no-such-kb"
+        assert result["retryable"] is False
+
     def test_kb_link_in_write_tier(self):
         """Test kb_link appears in write-tier tools but not read-tier."""
         with _make_mcp_server([{"name": "t", "kb_type": KBType.EVENTS}], tier="read") as read_env:
