@@ -160,6 +160,9 @@ Target: 0.24.2 "Operational" — see `kb/roadmap.md`.
   other specs use, 8 of those 18 assertions are false, which is what the
   second world buys.
 
+- `kb_link` now verifies that both endpoints exist before writing a link, so
+  a misspelled or deleted target cannot create a dangling outlink. Missing
+  source or target entries return a non-retryable `LINK_FAILED`. (#97)
 - **Typed entries no longer drop frontmatter they do not declare.** A load ->
   save through any typed class (core or plugin) deleted unknown keys —
   `pyrite update -f status=done` stripped `milestone:` and `created:`. The

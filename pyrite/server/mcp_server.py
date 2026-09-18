@@ -964,6 +964,8 @@ class PyriteMCPServer:
                 target_kb=target_kb,
                 note=note,
             )
+        except EntryNotFoundError as e:
+            return _error("LINK_FAILED", str(e), retryable=False)
         except PyriteError as e:
             return _error("LINK_FAILED", str(e), retryable=True)
 

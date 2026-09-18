@@ -913,15 +913,60 @@ class TestPyriteMCPServer:
 
     def test_kb_link_not_found(self, mcp_admin_server):
         """Test linking from a nonexistent entry returns error."""
-        result = mcp_admin_server["server"]._dispatch_tool(
+        server = mcp_admin_server["server"]
+        target = server._dispatch_tool(
+            "kb_create",
+            {
+                "kb_name": "test-events",
+                "entry_type": "event",
+                "title": "Existing Link Target",
+                "date": "2025-04-05",
+                "body": "Target entry.",
+            },
+        )
+
+        result = server._dispatch_tool(
             "kb_link",
             {
                 "source_id": "no-such-entry",
                 "source_kb": "test-events",
-                "target_id": "also-missing",
+                "target_id": target["entry_id"],
             },
         )
-        assert "error" in result
+        assert result["error_code"] == "LINK_FAILED"
+        assert result["error"] == "Entry not found: no-such-entry"
+        assert result["retryable"] is False
+
+    def test_kb_link_target_not_found(self, mcp_admin_server):
+        """Test linking to a nonexistent entry does not create a dangling link."""
+        server = mcp_admin_server["server"]
+        source = server._dispatch_tool(
+            "kb_create",
+            {
+                "kb_name": "test-events",
+                "entry_type": "event",
+                "title": "Existing Link Source",
+                "date": "2025-04-06",
+                "body": "Source entry.",
+            },
+        )
+
+        result = server._dispatch_tool(
+            "kb_link",
+            {
+                "source_id": source["entry_id"],
+                "source_kb": "test-events",
+                "target_id": "no-such-target",
+                "target_kb": "test-research",
+            },
+        )
+
+        assert result["error_code"] == "LINK_FAILED"
+        assert result["error"] == "Entry not found: no-such-target"
+        assert result["retryable"] is False
+        stored = KBRepository(mcp_admin_server["test-events"]).load(source["entry_id"])
+        assert stored is not None
+        assert all(link.target != "no-such-target" for link in stored.links)
 
     def test_kb_link_in_write_tier(self):
         """Test kb_link appears in write-tier tools but not read-tier."""

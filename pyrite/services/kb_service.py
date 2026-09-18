@@ -741,6 +741,14 @@ class KBService:
             raise EntryNotFoundError(f"Entry not found: {source_id}")
 
         tkb = target_kb or source_kb
+        target_kb_config = self.config.get_kb(tkb)
+        if not target_kb_config:
+            raise KBNotFoundError(f"KB not found: {tkb}")
+
+        target_repo = repo if tkb == source_kb else KBRepository(target_kb_config)
+        if not target_repo.load(target_id):
+            raise EntryNotFoundError(f"Entry not found: {target_id}")
+
         # Check for duplicate
         for existing in entry.links:
             if existing.target == target_id and (existing.kb or source_kb) == tkb:
