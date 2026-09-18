@@ -1,8 +1,5 @@
 """Tests for per-KB permissions: role resolution, grant/revoke, ephemeral KB creation."""
 
-import tempfile
-from pathlib import Path
-
 import pytest
 
 from pyrite.config import AuthConfig, KBConfig, PyriteConfig, Settings
@@ -11,9 +8,8 @@ from pyrite.storage.database import PyriteDB
 
 
 @pytest.fixture
-def tmpdir():
-    with tempfile.TemporaryDirectory() as d:
-        yield Path(d)
+def tmpdir(tmp_path):
+    return tmp_path
 
 
 @pytest.fixture
@@ -35,14 +31,14 @@ def setup(tmpdir):
             ),
         ),
     )
-    db = PyriteDB(db_path)
-    auth = AuthService(db, config.settings.auth)
+    with PyriteDB(db_path) as db:
+        auth = AuthService(db, config.settings.auth)
 
-    # Register admin (first user) and a regular user
-    admin = auth.register("admin", "password123", "Admin User")
-    user = auth.register("alice", "password123", "Alice")
+        # Register admin (first user) and a regular user
+        admin = auth.register("admin", "password123", "Admin User")
+        user = auth.register("alice", "password123", "Alice")
 
-    return auth, db, config, admin, user
+        yield auth, db, config, admin, user
 
 
 class TestGetKBRole:

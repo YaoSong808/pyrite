@@ -2,45 +2,9 @@
 Tests for wikilink-related API endpoints: /api/entries/titles and /api/entries/resolve.
 """
 
-import tempfile
-from pathlib import Path
-
 import pytest
 
 fastapi = pytest.importorskip("fastapi", reason="fastapi not installed")
-from fastapi.testclient import TestClient
-
-from pyrite.config import KBConfig, PyriteConfig, Settings
-from pyrite.server.api import create_app, get_config, get_db
-from pyrite.storage.database import PyriteDB
-
-
-@pytest.fixture
-def tmpdir():
-    with tempfile.TemporaryDirectory() as d:
-        yield Path(d)
-
-
-def _make_app_and_db(tmpdir):
-    """Create app with test config and seeded DB."""
-    db_path = tmpdir / "index.db"
-    kb_path = tmpdir / "kb"
-    kb_path.mkdir(exist_ok=True)
-
-    config = PyriteConfig(
-        knowledge_bases=[
-            KBConfig(name="test-kb", path=kb_path, kb_type="generic"),
-        ],
-        settings=Settings(index_path=db_path, api_key=""),
-    )
-
-    app = create_app(config=config)
-    db = PyriteDB(db_path)
-
-    app.dependency_overrides[get_config] = lambda: config
-    app.dependency_overrides[get_db] = lambda: db
-
-    return app, db
 
 
 def _seed_entries(db):
@@ -67,16 +31,16 @@ def _seed_entries(db):
 
 
 @pytest.fixture
-def client(tmpdir):
-    app, db = _make_app_and_db(tmpdir)
+def client(make_client):
+    client, _config, db = make_client(api_key="")
     _seed_entries(db)
-    return TestClient(app)
+    return client
 
 
 @pytest.fixture
-def empty_client(tmpdir):
-    app, _db = _make_app_and_db(tmpdir)
-    return TestClient(app)
+def empty_client(make_client):
+    client, _config, _db = make_client(api_key="")
+    return client
 
 
 # =============================================================================

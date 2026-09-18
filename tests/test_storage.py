@@ -3,6 +3,7 @@ Tests for storage layer (database, repository, index).
 """
 
 import logging
+import sqlite3
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -47,6 +48,34 @@ class TestPyriteDB:
             "SELECT name FROM sqlite_master WHERE type='table' AND name='entry_fts'"
         ).fetchone()
         assert row is not None
+
+    def test_context_manager_closes_on_exit(self, tmp_path):
+        """`with PyriteDB(path) as db:` closes the connection on block exit,
+        so a test/caller doesn't have to remember a manual db.close() --
+        tests-leak-open-pyritedb-connections-into-temporarydirectory-
+        teardown: an unclosed connection in WAL mode recreates -wal/-shm
+        files while a TemporaryDirectory is being torn down."""
+        db_path = tmp_path / "ctx.db"
+        with PyriteDB(db_path) as db:
+            db.register_kb("test-kb", "generic", "/tmp/test", "Test KB")
+            assert db.get_kb_stats("test-kb") is not None
+            closed_ref = db
+
+        # The raw sqlite3 connection is closed: any use raises.
+        with pytest.raises(sqlite3.ProgrammingError):
+            closed_ref._raw_conn.execute("SELECT 1")
+
+    def test_context_manager_closes_on_exception(self, tmp_path):
+        """The connection is still closed if the with-block raises."""
+        db_path = tmp_path / "ctx-err.db"
+        captured = {}
+        with pytest.raises(ValueError):
+            with PyriteDB(db_path) as db:
+                captured["db"] = db
+                raise ValueError("boom")
+
+        with pytest.raises(sqlite3.ProgrammingError):
+            captured["db"]._raw_conn.execute("SELECT 1")
 
     def test_register_kb(self, db):
         """Test KB registration."""

@@ -8,9 +8,6 @@ This service is the recording + quota-check layer; LLMService wires
 into it separately.
 """
 
-import tempfile
-from pathlib import Path
-
 import pytest
 
 from pyrite.services.llm_usage_service import LLMUsageService
@@ -18,10 +15,9 @@ from pyrite.storage.database import PyriteDB
 
 
 @pytest.fixture
-def usage_env():
-    with tempfile.TemporaryDirectory() as d:
-        db_path = Path(d) / "index.db"
-        db = PyriteDB(db_path)
+def usage_env(tmp_path):
+    db_path = tmp_path / "index.db"
+    with PyriteDB(db_path) as db:
         service = LLMUsageService(db)
         yield service, db
 

@@ -2,77 +2,41 @@
 Tests for REST API security: CORS configuration and API key authentication.
 """
 
-import tempfile
-from pathlib import Path
-
 import pytest
 
 fastapi = pytest.importorskip("fastapi", reason="fastapi not installed")
-from fastapi.testclient import TestClient
 
-from pyrite.config import KBConfig, PyriteConfig, Settings
-from pyrite.server.api import create_app, get_config, get_db
-from pyrite.storage.database import PyriteDB
+from pyrite.config import PyriteConfig, Settings
 
-
-def _make_client(cors_origins=None, api_key="", tmpdir=None):
-    """Create a TestClient with a fresh app using the given security settings."""
-    if cors_origins is None:
-        cors_origins = ["http://localhost:3000", "http://localhost:5173", "http://localhost:8088"]
-
-    db_path = tmpdir / "index.db"
-    kb_path = tmpdir / "kb"
-    kb_path.mkdir(exist_ok=True)
-
-    config = PyriteConfig(
-        knowledge_bases=[
-            KBConfig(name="test-kb", path=kb_path, kb_type="generic"),
-        ],
-        settings=Settings(
-            index_path=db_path,
-            cors_origins=cors_origins,
-            api_key=api_key,
-        ),
-    )
-
-    application = create_app(config=config)
-
-    # Override dependencies to use test config and DB
-    db = PyriteDB(db_path)
-    application.dependency_overrides[get_config] = lambda: config
-    application.dependency_overrides[get_db] = lambda: db
-
-    return TestClient(application)
+_DEFAULT_CORS = ["http://localhost:3000", "http://localhost:5173", "http://localhost:8088"]
 
 
 @pytest.fixture
-def tmpdir():
-    with tempfile.TemporaryDirectory() as d:
-        yield Path(d)
-
-
-@pytest.fixture
-def client_no_auth(tmpdir):
+def client_no_auth(make_client):
     """App with no API key (auth disabled)."""
-    return _make_client(api_key="", tmpdir=tmpdir)
+    client, _config, _db = make_client(api_key="", cors_origins=_DEFAULT_CORS)
+    return client
 
 
 @pytest.fixture
-def client_with_auth(tmpdir):
+def client_with_auth(make_client):
     """App with API key auth enabled."""
-    return _make_client(api_key="test-secret-key", tmpdir=tmpdir)
+    client, _config, _db = make_client(api_key="test-secret-key", cors_origins=_DEFAULT_CORS)
+    return client
 
 
 @pytest.fixture
-def client_custom_cors(tmpdir):
+def client_custom_cors(make_client):
     """App with custom CORS origins."""
-    return _make_client(cors_origins=["https://myapp.example.com"], tmpdir=tmpdir)
+    client, _config, _db = make_client(api_key="", cors_origins=["https://myapp.example.com"])
+    return client
 
 
 @pytest.fixture
-def client_wildcard_cors(tmpdir):
+def client_wildcard_cors(make_client):
     """App with wildcard CORS origins."""
-    return _make_client(cors_origins=["*"], tmpdir=tmpdir)
+    client, _config, _db = make_client(api_key="", cors_origins=["*"])
+    return client
 
 
 # =============================================================================

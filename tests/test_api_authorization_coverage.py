@@ -22,14 +22,12 @@ route to read-tier callers requires editing that list in the same diff.
 """
 
 import re
-import tempfile
-from pathlib import Path
 
 import pytest
 
 fastapi = pytest.importorskip("fastapi", reason="fastapi not installed")
 
-from tests.test_api_tiers import _hash_key, _make_client
+from tests.test_api_tiers import _build_client, _hash_key
 
 MUTATING_METHODS = ("post", "put", "patch", "delete")
 
@@ -64,12 +62,22 @@ def _fill_path(path: str) -> str:
 
 
 @pytest.fixture(scope="module")
-def read_client():
-    with tempfile.TemporaryDirectory() as tmpdir:
-        keys = [{"key_hash": _hash_key("read-key"), "role": "read", "label": "Reader"}]
-        client, _ = _make_client(Path(tmpdir), api_keys=keys)
-        client.headers.update({"X-API-Key": "read-key"})
+def read_client(tmp_path_factory):
+    """Module-scoped: this file walks the whole mutating API surface with
+    empty bodies, which could incidentally touch the index worker (e.g. a
+    route that starts a background sync). Join it and close the DB before
+    tmp_path_factory removes the directory -- same shape as GitHub #55 and
+    tests-leak-open-pyritedb-connections-into-temporarydirectory-teardown.
+    """
+    tmpdir = tmp_path_factory.mktemp("authz_coverage")
+    keys = [{"key_hash": _hash_key("read-key"), "role": "read", "label": "Reader"}]
+    client, _, db, index_worker = _build_client(tmpdir, api_keys=keys)
+    client.headers.update({"X-API-Key": "read-key"})
+    try:
         yield client
+    finally:
+        index_worker.wait_for_idle(timeout=10)
+        db.close()
 
 
 def _mutating_routes(client) -> list[tuple[str, str]]:

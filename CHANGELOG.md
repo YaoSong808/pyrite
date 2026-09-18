@@ -48,6 +48,9 @@ Target: 0.24.2 "Operational" — see `kb/roadmap.md`.
   write, on by default. Off means keyword search only, no torch import and no
   model download on the write path; `pyrite index embed` backfills later. The
   first half of #13 (first write on a fresh install blocked on the download).
+- `PyriteDB` is a context manager: `with PyriteDB(path) as db:` closes the
+  connection on block exit (and on an exception), so callers no longer have to
+  remember a manual `db.close()`.
 
 ### Process
 

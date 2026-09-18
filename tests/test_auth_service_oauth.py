@@ -1,8 +1,5 @@
 """Unit tests for AuthService.oauth_login()."""
 
-import tempfile
-from pathlib import Path
-
 import pytest
 
 from pyrite.config import AuthConfig, OAuthProviderConfig
@@ -12,10 +9,9 @@ from pyrite.storage.database import PyriteDB
 
 
 @pytest.fixture
-def db_and_service():
-    with tempfile.TemporaryDirectory() as tmpdir:
-        db_path = Path(tmpdir) / "test.db"
-        db = PyriteDB(db_path)
+def db_and_service(tmp_path):
+    db_path = tmp_path / "test.db"
+    with PyriteDB(db_path) as db:
         config = AuthConfig(enabled=True, allow_registration=True)
         service = AuthService(db, config)
         yield db, service

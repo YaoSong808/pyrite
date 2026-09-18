@@ -237,6 +237,19 @@ class ConnectionMixin:
             self._sa_conn.close()
         self.engine.dispose()
 
+    def __enter__(self):
+        """Support `with PyriteDB(path) as db:` -- closes on block exit so
+        callers (tests especially) don't have to remember a manual
+        db.close(). An unclosed connection in WAL mode can recreate its
+        -wal/-shm files while a caller's TemporaryDirectory is mid-rmtree
+        (tests-leak-open-pyritedb-connections-into-temporarydirectory-
+        teardown)."""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
+
     @contextmanager
     def transaction(self):
         """Context manager for ORM transactions with rollback on failure."""

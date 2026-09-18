@@ -11,16 +11,14 @@ Tests cover:
 """
 
 import hashlib
-import tempfile
-from pathlib import Path
 
 import pytest
 
 fastapi = pytest.importorskip("fastapi", reason="fastapi not installed")
-from fastapi.testclient import TestClient
 
 from pyrite.config import KBConfig, PyriteConfig, Settings
-from pyrite.server.api import create_app, get_config, get_db, resolve_api_key_role
+from pyrite.server.api import create_app, get_config, get_db, get_index_worker, resolve_api_key_role
+from pyrite.services.index_worker import IndexWorker
 from pyrite.storage.database import PyriteDB
 
 
@@ -29,10 +27,25 @@ def _hash_key(key: str) -> str:
     return hashlib.sha256(key.encode()).hexdigest()
 
 
-def _make_client(tmpdir, api_key="", api_keys=None):
-    """Create a TestClient with tier enforcement config."""
-    db_path = tmpdir / "index.db"
-    kb_path = tmpdir / "kb"
+def _build_client(work_dir, api_key="", api_keys=None):
+    """Build a TestClient + owned PyriteDB + owned IndexWorker.
+
+    Mirrors tests/conftest.py's `make_client` factory, but as a plain
+    function so class-scoped fixtures here (which can't depend on the
+    function-scoped `make_client`/`tmp_path`) can still get the same
+    close-everything-in-teardown shape. Returns (client, config, db,
+    index_worker); the caller is responsible for, in order:
+    index_worker.wait_for_idle() then db.close() in its fixture teardown,
+    BEFORE the class-scoped temp dir is removed -- GitHub #55 (a
+    lazily-created app-level IndexWorker's background thread still
+    writing to a class-scoped TemporaryDirectory being torn down) and
+    tests-leak-open-pyritedb-connections-into-temporarydirectory-teardown
+    (an unclosed WAL connection doing the same).
+    """
+    from starlette.testclient import TestClient
+
+    db_path = work_dir / "index.db"
+    kb_path = work_dir / "kb"
     kb_path.mkdir(parents=True, exist_ok=True)
 
     settings_kwargs = {
@@ -54,13 +67,11 @@ def _make_client(tmpdir, api_key="", api_keys=None):
     application.dependency_overrides[get_config] = lambda: config
     application.dependency_overrides[get_db] = lambda: db
 
+    index_worker = IndexWorker(db, config)
+    application.dependency_overrides[get_index_worker] = lambda: index_worker
+
     client = TestClient(application)
-    # The fixture that yields this client must call client.pyrite_db.close():
-    # an open SQLite connection recreates its -wal/-shm files while
-    # TemporaryDirectory is deleting the tree, and teardown fails with
-    # "Directory not empty" (seen under -n auto).
-    client.pyrite_db = db
-    return client, config
+    return client, config, db, index_worker
 
 
 # =============================================================================
@@ -71,29 +82,33 @@ def _make_client(tmpdir, api_key="", api_keys=None):
 class TestResolveAPIKeyRole:
     """Test the key → role resolution logic."""
 
+    @classmethod
     @pytest.fixture(scope="class")
-    def configs(self):
+    def configs(cls, tmp_path_factory):
         """Create configs once for all role resolution tests."""
-        with tempfile.TemporaryDirectory() as d:
-            tmpdir = Path(d)
-            c1, no_auth_config = _make_client(tmpdir / "no-auth", api_key="", api_keys=[])
-            c2, single_key_config = _make_client(tmpdir / "single", api_key="secret123")
-            keys = [{"key_hash": _hash_key("list-key"), "role": "read", "label": "Reader"}]
-            c3, list_config = _make_client(tmpdir / "list", api_keys=keys)
-            keys_coexist = [{"key_hash": _hash_key("list-key"), "role": "read", "label": "Reader"}]
-            c4, coexist_config = _make_client(
-                tmpdir / "coexist", api_key="legacy-key", api_keys=keys_coexist
-            )
-            try:
-                yield {
-                    "no_auth": no_auth_config,
-                    "single_key": single_key_config,
-                    "list": list_config,
-                    "coexist": coexist_config,
-                }
-            finally:
-                for c in (c1, c2, c3, c4):
-                    c.pyrite_db.close()
+        tmpdir = tmp_path_factory.mktemp("resolve_api_key_role")
+        c1, no_auth_config, db1, w1 = _build_client(tmpdir / "no-auth", api_key="", api_keys=[])
+        c2, single_key_config, db2, w2 = _build_client(tmpdir / "single", api_key="secret123")
+        keys = [{"key_hash": _hash_key("list-key"), "role": "read", "label": "Reader"}]
+        c3, list_config, db3, w3 = _build_client(tmpdir / "list", api_keys=keys)
+        keys_coexist = [{"key_hash": _hash_key("list-key"), "role": "read", "label": "Reader"}]
+        c4, coexist_config, db4, w4 = _build_client(
+            tmpdir / "coexist", api_key="legacy-key", api_keys=keys_coexist
+        )
+        try:
+            yield {
+                "no_auth": no_auth_config,
+                "single_key": single_key_config,
+                "list": list_config,
+                "coexist": coexist_config,
+            }
+        finally:
+            # Join every index worker's threads before closing its DB,
+            # and both before tmp_path_factory removes the directory.
+            for w in (w1, w2, w3, w4):
+                w.wait_for_idle(timeout=10)
+            for db in (db1, db2, db3, db4):
+                db.close()
 
     def test_no_auth_returns_admin(self, configs):
         """When auth is disabled (no api_key, no api_keys), everyone gets admin."""
@@ -160,21 +175,27 @@ class TestResolveAPIKeyRole:
 class TestTierHierarchy:
     """Test that tier hierarchy (admin > write > read) is enforced correctly."""
 
+    @classmethod
     @pytest.fixture(scope="class")
-    def three_key_client(self):
+    def three_key_client(cls, tmp_path_factory):
         """One client with read, write, admin keys — shared across all tests."""
-        with tempfile.TemporaryDirectory() as d:
-            tmpdir = Path(d)
-            keys = [
-                {"key_hash": _hash_key("read-key"), "role": "read", "label": "R"},
-                {"key_hash": _hash_key("write-key"), "role": "write", "label": "W"},
-                {"key_hash": _hash_key("admin-key"), "role": "admin", "label": "A"},
-            ]
-            client, _ = _make_client(tmpdir, api_keys=keys)
-            try:
-                yield client
-            finally:
-                client.pyrite_db.close()
+        tmpdir = tmp_path_factory.mktemp("tier_hierarchy")
+        keys = [
+            {"key_hash": _hash_key("read-key"), "role": "read", "label": "R"},
+            {"key_hash": _hash_key("write-key"), "role": "write", "label": "W"},
+            {"key_hash": _hash_key("admin-key"), "role": "admin", "label": "A"},
+        ]
+        client, _, db, index_worker = _build_client(tmpdir, api_keys=keys)
+        try:
+            yield client
+        finally:
+            # This class's test_admin_key_can_access_all_tiers hits
+            # /api/index/sync, which starts a background thread on
+            # index_worker (the get_index_worker override) -- it must be
+            # idle before db.close() and before tmp_path_factory removes
+            # the directory (GitHub #55).
+            index_worker.wait_for_idle(timeout=10)
+            db.close()
 
     def test_read_key_can_access_read_endpoints(self, three_key_client):
         """Read-tier key can access read-only endpoints (GET /api/kbs)."""
@@ -244,25 +265,31 @@ class TestTierHierarchy:
 class TestBackwardsCompatibility:
     """Existing behavior must not break."""
 
+    @classmethod
     @pytest.fixture(scope="class")
-    def no_auth_client(self):
+    def no_auth_client(cls, tmp_path_factory):
         """Client with no auth configured."""
-        with tempfile.TemporaryDirectory() as d:
-            client, _ = _make_client(Path(d), api_key="")
-            try:
-                yield client
-            finally:
-                client.pyrite_db.close()
+        tmpdir = tmp_path_factory.mktemp("no_auth")
+        client, _, db, index_worker = _build_client(tmpdir, api_key="")
+        try:
+            yield client
+        finally:
+            # test_no_auth_all_endpoints_accessible hits /api/index/sync.
+            index_worker.wait_for_idle(timeout=10)
+            db.close()
 
+    @classmethod
     @pytest.fixture(scope="class")
-    def single_key_client(self):
+    def single_key_client(cls, tmp_path_factory):
         """Client with legacy single api_key."""
-        with tempfile.TemporaryDirectory() as d:
-            client, _ = _make_client(Path(d), api_key="my-key")
-            try:
-                yield client
-            finally:
-                client.pyrite_db.close()
+        tmpdir = tmp_path_factory.mktemp("single_key")
+        client, _, db, index_worker = _build_client(tmpdir, api_key="my-key")
+        try:
+            yield client
+        finally:
+            # test_single_api_key_all_endpoints_with_key hits /api/index/sync.
+            index_worker.wait_for_idle(timeout=10)
+            db.close()
 
     def test_no_auth_all_endpoints_accessible(self, no_auth_client):
         """When api_key is empty and no api_keys, everything works (current behavior)."""
@@ -281,15 +308,15 @@ class TestBackwardsCompatibility:
         """Legacy single api_key: missing key still returns 401."""
         assert single_key_client.get("/api/kbs").status_code == 401
 
-    def test_health_always_accessible(self):
+    def test_health_always_accessible(self, tmp_path):
         """Health endpoint never requires auth, regardless of config."""
-        with tempfile.TemporaryDirectory() as d:
-            keys = [{"key_hash": _hash_key("k"), "role": "read", "label": "R"}]
-            client, _ = _make_client(Path(d), api_keys=keys)
-            try:
-                assert client.get("/health").status_code == 200
-            finally:
-                client.pyrite_db.close()
+        keys = [{"key_hash": _hash_key("k"), "role": "read", "label": "R"}]
+        client, _, db, index_worker = _build_client(tmp_path, api_keys=keys)
+        try:
+            assert client.get("/health").status_code == 200
+        finally:
+            index_worker.wait_for_idle(timeout=10)
+            db.close()
 
 
 # =============================================================================
@@ -300,16 +327,18 @@ class TestBackwardsCompatibility:
 class TestTierErrorResponses:
     """Test that tier enforcement returns clear error messages."""
 
+    @classmethod
     @pytest.fixture(scope="class")
-    def read_only_client(self):
+    def read_only_client(cls, tmp_path_factory):
         """Client with only a read-tier key."""
-        with tempfile.TemporaryDirectory() as d:
-            keys = [{"key_hash": _hash_key("read-key"), "role": "read", "label": "R"}]
-            client, _ = _make_client(Path(d), api_keys=keys)
-            try:
-                yield client
-            finally:
-                client.pyrite_db.close()
+        tmpdir = tmp_path_factory.mktemp("read_only")
+        keys = [{"key_hash": _hash_key("read-key"), "role": "read", "label": "R"}]
+        client, _, db, index_worker = _build_client(tmpdir, api_keys=keys)
+        try:
+            yield client
+        finally:
+            index_worker.wait_for_idle(timeout=10)
+            db.close()
 
     def test_403_includes_required_tier(self, read_only_client):
         """403 response should indicate which tier is required."""

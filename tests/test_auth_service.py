@@ -1,8 +1,5 @@
 """Tests for AuthService: registration, login, sessions, roles."""
 
-import tempfile
-from pathlib import Path
-
 import pytest
 
 
@@ -12,11 +9,10 @@ from pyrite.storage.database import PyriteDB
 
 
 @pytest.fixture
-def auth_env():
+def auth_env(tmp_path):
     """Create a fresh DB + AuthService for each test."""
-    with tempfile.TemporaryDirectory() as d:
-        db_path = Path(d) / "index.db"
-        db = PyriteDB(db_path)
+    db_path = tmp_path / "index.db"
+    with PyriteDB(db_path) as db:
         config = AuthConfig(enabled=True)
         service = AuthService(db, config)
         yield service, db
@@ -51,9 +47,8 @@ class TestRegister:
         with pytest.raises(ValueError, match="at least 8"):
             service.register("alice", "short")
 
-    def test_registration_disabled(self):
-        with tempfile.TemporaryDirectory() as d:
-            db = PyriteDB(Path(d) / "index.db")
+    def test_registration_disabled(self, tmp_path):
+        with PyriteDB(tmp_path / "index.db") as db:
             config = AuthConfig(enabled=True, allow_registration=False)
             service = AuthService(db, config)
             with pytest.raises(ValueError, match="disabled"):
@@ -117,9 +112,8 @@ class TestSessions:
         count = service.logout_all(reg["id"])
         assert count == 2
 
-    def test_max_sessions_enforced(self):
-        with tempfile.TemporaryDirectory() as d:
-            db = PyriteDB(Path(d) / "index.db")
+    def test_max_sessions_enforced(self, tmp_path):
+        with PyriteDB(tmp_path / "index.db") as db:
             config = AuthConfig(enabled=True, max_sessions_per_user=2)
             service = AuthService(db, config)
             service.register("alice", "password123")

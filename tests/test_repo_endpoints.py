@@ -1,68 +1,46 @@
 """Tests for Phase 3b+3d: Repo REST endpoints."""
 
-import tempfile
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 fastapi = pytest.importorskip("fastapi", reason="fastapi not installed")
 
-from fastapi.testclient import TestClient
-
-from pyrite.config import AuthConfig, KBConfig, OAuthProviderConfig, PyriteConfig, Settings
-from pyrite.server.api import create_app, get_config, get_db, get_repo_service
+from pyrite.config import AuthConfig
+from pyrite.server.api import get_repo_service
 from pyrite.services.repo_service import RepoService
-from pyrite.storage.database import PyriteDB
 
 
 @pytest.fixture
-def tmpdir():
-    with tempfile.TemporaryDirectory() as d:
-        yield Path(d)
-
-
-def _make_client(tmpdir, mock_repo_service=None):
+def _client_factory(make_client):
     """Create TestClient with auth enabled + optional repo service mock."""
-    db_path = tmpdir / "index.db"
-    kb_path = tmpdir / "kb"
-    kb_path.mkdir(exist_ok=True)
 
-    config = PyriteConfig(
-        knowledge_bases=[KBConfig(name="test-kb", path=kb_path, kb_type="generic")],
-        settings=Settings(
-            index_path=db_path,
+    def _make(mock_repo_service=None):
+        overrides = {}
+        if mock_repo_service:
+            overrides[get_repo_service] = lambda: mock_repo_service
+        client, config, db = make_client(
             auth=AuthConfig(enabled=True, allow_registration=True),
-        ),
-    )
+            dependency_overrides=overrides,
+            register_user=("testuser", "password123"),
+        )
+        return client, config, db
 
-    application = create_app(config=config)
-    db = PyriteDB(db_path)
-    application.dependency_overrides[get_config] = lambda: config
-    application.dependency_overrides[get_db] = lambda: db
-
-    if mock_repo_service:
-        application.dependency_overrides[get_repo_service] = lambda: mock_repo_service
-
-    client = TestClient(application)
-    # Register and login to get write access
-    client.post("/auth/register", json={"username": "testuser", "password": "password123"})
-
-    return client, config, db
+    return _make
 
 
 class TestListRepos:
-    def test_list_repos_empty(self, tmpdir):
+    def test_list_repos_empty(self, _client_factory):
         mock_svc = MagicMock(spec=RepoService)
         mock_svc.list_repos.return_value = []
-        client, _, _ = _make_client(tmpdir, mock_repo_service=mock_svc)
+        client, _, _ = _client_factory(mock_repo_service=mock_svc)
 
         r = client.get("/api/repos")
         assert r.status_code == 200
         data = r.json()
         assert data["repos"] == []
 
-    def test_list_repos_returns_repos(self, tmpdir):
+    def test_list_repos_returns_repos(self, _client_factory):
         mock_svc = MagicMock(spec=RepoService)
         mock_svc.list_repos.return_value = [
             {
@@ -76,7 +54,7 @@ class TestListRepos:
                 "is_fork": 0,
             }
         ]
-        client, _, _ = _make_client(tmpdir, mock_repo_service=mock_svc)
+        client, _, _ = _client_factory(mock_repo_service=mock_svc)
 
         r = client.get("/api/repos")
         assert r.status_code == 200
@@ -86,7 +64,7 @@ class TestListRepos:
 
 
 class TestSubscribe:
-    def test_subscribe_success(self, tmpdir):
+    def test_subscribe_success(self, _client_factory):
         mock_svc = MagicMock(spec=RepoService)
         mock_svc.subscribe.return_value = {
             "success": True,
@@ -95,7 +73,7 @@ class TestSubscribe:
             "kbs": ["my-kb"],
             "entries_indexed": 10,
         }
-        client, _, _ = _make_client(tmpdir, mock_repo_service=mock_svc)
+        client, _, _ = _client_factory(mock_repo_service=mock_svc)
 
         r = client.post(
             "/api/repos/subscribe", json={"remote_url": "https://github.com/owner/repo"}
@@ -104,10 +82,10 @@ class TestSubscribe:
         assert r.json()["success"] is True
         assert r.json()["kbs"] == ["my-kb"]
 
-    def test_subscribe_failure(self, tmpdir):
+    def test_subscribe_failure(self, _client_factory):
         mock_svc = MagicMock(spec=RepoService)
         mock_svc.subscribe.return_value = {"success": False, "error": "Path already exists"}
-        client, _, _ = _make_client(tmpdir, mock_repo_service=mock_svc)
+        client, _, _ = _client_factory(mock_repo_service=mock_svc)
 
         r = client.post(
             "/api/repos/subscribe", json={"remote_url": "https://github.com/owner/repo"}
@@ -116,16 +94,16 @@ class TestSubscribe:
 
 
 class TestFork:
-    def test_fork_requires_github_token(self, tmpdir):
+    def test_fork_requires_github_token(self, _client_factory):
         mock_svc = MagicMock(spec=RepoService)
         mock_svc._github_token = None
-        client, _, _ = _make_client(tmpdir, mock_repo_service=mock_svc)
+        client, _, _ = _client_factory(mock_repo_service=mock_svc)
 
         r = client.post("/api/repos/fork", json={"remote_url": "https://github.com/owner/repo"})
         assert r.status_code == 400
         assert "GITHUB_NOT_CONNECTED" in r.json()["detail"]["code"]
 
-    def test_fork_success(self, tmpdir):
+    def test_fork_success(self, _client_factory):
         mock_svc = MagicMock(spec=RepoService)
         mock_svc._github_token = "ghp_test"
         mock_svc.fork_and_subscribe.return_value = {
@@ -133,7 +111,7 @@ class TestFork:
             "repo": "user/repo",
             "is_fork": True,
         }
-        client, _, _ = _make_client(tmpdir, mock_repo_service=mock_svc)
+        client, _, _ = _client_factory(mock_repo_service=mock_svc)
 
         r = client.post("/api/repos/fork", json={"remote_url": "https://github.com/owner/repo"})
         assert r.status_code == 200
@@ -141,13 +119,13 @@ class TestFork:
 
 
 class TestSync:
-    def test_sync_success(self, tmpdir):
+    def test_sync_success(self, _client_factory):
         mock_svc = MagicMock(spec=RepoService)
         mock_svc.sync.return_value = {
             "success": True,
             "repos": {"owner/repo": {"success": True, "changes": 3}},
         }
-        client, _, _ = _make_client(tmpdir, mock_repo_service=mock_svc)
+        client, _, _ = _client_factory(mock_repo_service=mock_svc)
 
         r = client.post("/api/repos/owner/repo/sync")
         assert r.status_code == 200
@@ -155,7 +133,7 @@ class TestSync:
 
 
 class TestUnsubscribe:
-    def test_unsubscribe_success(self, tmpdir):
+    def test_unsubscribe_success(self, _client_factory):
         mock_svc = MagicMock(spec=RepoService)
         mock_svc.unsubscribe.return_value = {
             "success": True,
@@ -163,7 +141,7 @@ class TestUnsubscribe:
             "kbs_removed": ["my-kb"],
             "files_deleted": False,
         }
-        client, _, _ = _make_client(tmpdir, mock_repo_service=mock_svc)
+        client, _, _ = _client_factory(mock_repo_service=mock_svc)
 
         r = client.delete("/api/repos/owner/repo")
         assert r.status_code == 200
@@ -171,10 +149,10 @@ class TestUnsubscribe:
 
 
 class TestGitHubRepos:
-    def test_github_repos_requires_token(self, tmpdir):
+    def test_github_repos_requires_token(self, _client_factory):
         mock_svc = MagicMock(spec=RepoService)
         mock_svc._github_token = None
-        client, _, _ = _make_client(tmpdir, mock_repo_service=mock_svc)
+        client, _, _ = _client_factory(mock_repo_service=mock_svc)
 
         r = client.get("/api/github/repos")
         assert r.status_code == 400
@@ -182,16 +160,16 @@ class TestGitHubRepos:
 
 
 class TestCreatePR:
-    def test_pr_requires_github_token(self, tmpdir):
+    def test_pr_requires_github_token(self, _client_factory):
         mock_svc = MagicMock(spec=RepoService)
         mock_svc._github_token = None
-        client, _, _ = _make_client(tmpdir, mock_repo_service=mock_svc)
+        client, _, _ = _client_factory(mock_repo_service=mock_svc)
 
         r = client.post("/api/repos/owner/repo/pr", json={"title": "Test PR"})
         assert r.status_code == 400
         assert "GITHUB_NOT_CONNECTED" in r.json()["detail"]["code"]
 
-    def test_pr_success(self, tmpdir):
+    def test_pr_success(self, _client_factory):
         mock_svc = MagicMock(spec=RepoService)
         mock_svc._github_token = "ghp_test"
         mock_svc.create_pr.return_value = {
@@ -199,7 +177,7 @@ class TestCreatePR:
             "pr_url": "https://github.com/owner/repo/pull/1",
             "pr_number": 1,
         }
-        client, _, _ = _make_client(tmpdir, mock_repo_service=mock_svc)
+        client, _, _ = _client_factory(mock_repo_service=mock_svc)
 
         r = client.post(
             "/api/repos/owner/repo/pr", json={"title": "Test PR", "body": "Description"}

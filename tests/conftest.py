@@ -17,6 +17,13 @@ from pyrite.storage.database import PyriteDB
 from pyrite.storage.index import IndexManager
 from pyrite.storage.repository import KBRepository
 
+try:
+    import fastapi  # noqa: F401
+
+    _HAS_FASTAPI = True
+except ImportError:
+    _HAS_FASTAPI = False
+
 
 @pytest.fixture(autouse=True)
 def _isolate_global_config(tmp_path_factory, monkeypatch):
@@ -191,3 +198,98 @@ def rest_api_env(indexed_test_env):
     # teardown (and pyrite_db/tmp_kb_dir's) runs -- same full-suite-only
     # flaky-test root cause as the `worker` fixture in test_index_worker.py.
     _index_worker.wait_for_idle(timeout=10)
+
+
+@pytest.fixture
+def make_client(tmp_path):
+    """Factory fixture: build a `TestClient` + `PyriteConfig` + `PyriteDB`
+    for a REST API test, replacing the hand-rolled `_make_client` helpers
+    duplicated across test_api_tiers.py, test_api_wikilinks.py,
+    test_api_security.py, and test_repo_endpoints.py.
+
+    Owns the DB it creates and the app's index worker: both are closed /
+    joined at teardown, in that order, before pytest removes `tmp_path`.
+    This is what those hand-rolled helpers were missing --
+    tests-leak-open-pyritedb-connections-into-temporarydirectory-teardown
+    (an unclosed WAL connection) and GitHub #55 (an index-worker thread
+    still writing when the directory is removed). Also used to build
+    extra dbs/apps beyond the returned one; call it more than once per
+    test and every db/worker it creates is tracked and cleaned up.
+
+    Usage:
+        client, config, db = make_client(api_key="secret", kb_name="test-kb")
+
+    `tmp_path` (not `tempfile.TemporaryDirectory()`) means a late writer
+    after the test ends cannot fail the run: pytest doesn't delete it.
+    """
+    if not _HAS_FASTAPI:
+        pytest.skip("fastapi not installed")
+
+    from starlette.testclient import TestClient
+
+    from pyrite.server.api import create_app, get_config, get_db, get_index_worker
+    from pyrite.services.index_worker import IndexWorker
+
+    created: list[tuple[PyriteDB, IndexWorker]] = []
+    counter = {"n": 0}
+
+    def _make(
+        api_key: str = "",
+        api_keys: list[dict] | None = None,
+        kb_name: str = "test-kb",
+        cors_origins: list[str] | None = None,
+        auth=None,
+        extra_settings: dict | None = None,
+        register_user: tuple[str, str] | None = None,
+        dependency_overrides: dict | None = None,
+    ):
+        counter["n"] += 1
+        work_dir = tmp_path / f"client-{counter['n']}"
+        db_path = work_dir / "index.db"
+        kb_path = work_dir / "kb"
+        kb_path.mkdir(parents=True, exist_ok=True)
+
+        settings_kwargs: dict = {"index_path": db_path, "api_key": api_key}
+        if api_keys is not None:
+            settings_kwargs["api_keys"] = api_keys
+        if cors_origins is not None:
+            settings_kwargs["cors_origins"] = cors_origins
+        if auth is not None:
+            settings_kwargs["auth"] = auth
+        if extra_settings:
+            settings_kwargs.update(extra_settings)
+
+        config = PyriteConfig(
+            knowledge_bases=[KBConfig(name=kb_name, path=kb_path, kb_type="generic")],
+            settings=Settings(**settings_kwargs),
+        )
+
+        application = create_app(config=config)
+        db = PyriteDB(db_path)
+        application.dependency_overrides[get_config] = lambda: config
+        application.dependency_overrides[get_db] = lambda: db
+
+        index_worker = IndexWorker(db, config)
+        application.dependency_overrides[get_index_worker] = lambda: index_worker
+
+        if dependency_overrides:
+            for dep, override in dependency_overrides.items():
+                application.dependency_overrides[dep] = override
+
+        client = TestClient(application)
+        created.append((db, index_worker))
+
+        if register_user is not None:
+            username, password = register_user
+            client.post("/auth/register", json={"username": username, "password": password})
+
+        return client, config, db
+
+    yield _make
+
+    # Teardown order matters: join/stop every index worker's background
+    # threads BEFORE closing the DB connections they write through, and
+    # both before pytest removes tmp_path.
+    for db, index_worker in created:
+        index_worker.wait_for_idle(timeout=10)
+        db.close()

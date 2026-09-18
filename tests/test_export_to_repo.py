@@ -1,7 +1,5 @@
 """Tests for Phase 3c: Export-to-repo service."""
 
-import tempfile
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -12,29 +10,26 @@ from pyrite.storage.database import PyriteDB
 
 
 @pytest.fixture
-def export_env():
+def export_env(tmp_path):
     """Create a fresh DB + ExportService for each test."""
-    with tempfile.TemporaryDirectory() as d:
-        tmpdir = Path(d)
-        db_path = tmpdir / "index.db"
-        kb_path = tmpdir / "kb"
-        kb_path.mkdir()
+    tmpdir = tmp_path
+    db_path = tmpdir / "index.db"
+    kb_path = tmpdir / "kb"
+    kb_path.mkdir()
 
-        # Create a simple KB with entries
-        (kb_path / "kb.yaml").write_text("name: test-kb\nkb_type: generic\n")
-        (kb_path / "note").mkdir()
-        (kb_path / "note" / "hello.md").write_text(
-            "---\ntitle: Hello\ntype: note\n---\nHello world"
-        )
+    # Create a simple KB with entries
+    (kb_path / "kb.yaml").write_text("name: test-kb\nkb_type: generic\n")
+    (kb_path / "note").mkdir()
+    (kb_path / "note" / "hello.md").write_text("---\ntitle: Hello\ntype: note\n---\nHello world")
 
-        config = PyriteConfig(
-            knowledge_bases=[
-                KBConfig(name="test-kb", path=kb_path, kb_type=KBType.GENERIC),
-            ],
-            settings=Settings(index_path=db_path),
-        )
+    config = PyriteConfig(
+        knowledge_bases=[
+            KBConfig(name="test-kb", path=kb_path, kb_type=KBType.GENERIC),
+        ],
+        settings=Settings(index_path=db_path),
+    )
 
-        db = PyriteDB(db_path)
+    with PyriteDB(db_path) as db:
         # Index the entry
         from pyrite.storage.index import IndexManager
 
